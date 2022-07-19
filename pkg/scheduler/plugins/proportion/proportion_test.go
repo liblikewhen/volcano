@@ -14,19 +14,21 @@ limitations under the License.
 package proportion
 
 import (
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"io/ioutil"
-	"k8s.io/client-go/util/workqueue"
 	"net/http"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"k8s.io/client-go/util/workqueue"
 	"volcano.sh/volcano/pkg/scheduler/actions/allocate"
 
 	"github.com/agiledragon/gomonkey/v2"
 	apiv1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -99,7 +101,7 @@ func getLocalMetrics() int {
 	return data
 }
 
-func TestProportion(t *testing.T) {
+func TestProportionPanic(t *testing.T) {
 	c := make(chan bool, 1)
 	var tmp *cache.SchedulerCache
 	patches := gomonkey.ApplyMethod(reflect.TypeOf(tmp), "AddBindTask", func(scCache *cache.SchedulerCache, task *api.TaskInfo) error {
@@ -112,19 +114,17 @@ func TestProportion(t *testing.T) {
 	framework.RegisterPluginBuilder(gang.PluginName, gang.New)
 	framework.RegisterPluginBuilder(priority.PluginName, priority.New)
 	options.ServerOpts = options.NewServerOption()
-	defer framework.CleanupPluginBuilders()
+	//defer framework.CleanupPluginBuilders()
 
 	// Running pods
-	w1 := util.BuildPod("ns1", "worker-1", "", apiv1.PodRunning, util.BuildResourceList("3", "3k"), "pg1", map[string]string{"role": "worker"}, map[string]string{"selector": "worker"})
-	w2 := util.BuildPod("ns1", "worker-2", "", apiv1.PodRunning, util.BuildResourceList("5", "5k"), "pg1", map[string]string{"role": "worker"}, map[string]string{})
-	w3 := util.BuildPod("ns1", "worker-3", "", apiv1.PodRunning, util.BuildResourceList("4", "4k"), "pg2", map[string]string{"role": "worker"}, map[string]string{})
-	w1.Spec.Affinity = getWorkerAffinity()
-	w2.Spec.Affinity = getWorkerAffinity()
-	w3.Spec.Affinity = getWorkerAffinity()
+	w1 := util.BuildPod("ns1", "worker-1", "", apiv1.PodRunning, util.BuildResourceList("40", "1k"), "pg1", map[string]string{"role": "worker"}, map[string]string{"selector": "worker"})
+	w2 := util.BuildPod("ns2", "worker-2", "", apiv1.PodRunning, util.BuildResourceList("20", "1k"), "pg2", map[string]string{"role": "worker"}, map[string]string{"selector": "worker"})
+	w3 := util.BuildPod("ns2", "worker-3", "", apiv1.PodPending, util.BuildResourceList("20", "1k"), "pg3", map[string]string{"role": "worker"}, map[string]string{"selector": "worker"})
+	////w1.Spec.Affinity = getWorkerAffinity()
 
 	// nodes
-	n1 := util.BuildNode("node1", util.BuildResourceList("4", "4k"), map[string]string{"selector": "worker"})
-	n2 := util.BuildNode("node2", util.BuildResourceList("3", "3k"), map[string]string{})
+	n1 := util.BuildNode("node1", util.BuildResourceList("50", "4k"), map[string]string{"selector": "worker"})
+	n2 := util.BuildNode("node2", util.BuildResourceList("50", "3k"), map[string]string{})
 	n1.Status.Allocatable["pods"] = resource.MustParse("15")
 	n2.Status.Allocatable["pods"] = resource.MustParse("15")
 	n1.Labels["kubernetes.io/hostname"] = "node1"
@@ -132,7 +132,6 @@ func TestProportion(t *testing.T) {
 
 	// priority
 	p1 := &schedulingv1.PriorityClass{ObjectMeta: metav1.ObjectMeta{Name: "p1"}, Value: 1}
-	p2 := &schedulingv1.PriorityClass{ObjectMeta: metav1.ObjectMeta{Name: "p2"}, Value: 2}
 	// podgroup
 	pg1 := &schedulingv1beta1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
@@ -142,24 +141,88 @@ func TestProportion(t *testing.T) {
 		Spec: schedulingv1beta1.PodGroupSpec{
 			Queue:             "q1",
 			MinMember:         int32(2),
-			PriorityClassName: p2.Name,
+			PriorityClassName: p1.Name,
+			MinResources: &v1.ResourceList{
+				v1.ResourceName("cpu"): resource.MustParse("40"),
+			},
 		},
 	}
 	pg2 := &schedulingv1beta1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "ns1",
+			Namespace: "ns2",
 			Name:      "pg2",
 		},
 		Spec: schedulingv1beta1.PodGroupSpec{
-			Queue:             "q1",
+			Queue:             "q2",
 			MinMember:         int32(1),
 			PriorityClassName: p1.Name,
+			MinResources: &v1.ResourceList{
+				v1.ResourceName("cpu"): resource.MustParse("20"),
+			},
 		},
 	}
+	pg3 := &schedulingv1beta1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns2",
+			Name:      "pg3",
+		},
+		Spec: schedulingv1beta1.PodGroupSpec{
+			Queue:             "q3",
+			MinMember:         int32(1),
+			PriorityClassName: p1.Name,
+			MinResources: &v1.ResourceList{
+				v1.ResourceName("cpu"): resource.MustParse("20"),
+			},
+		},
+	}
+
 	// queue
 	queue1 := &schedulingv1beta1.Queue{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "q1",
+		},
+		Spec: schedulingv1beta1.QueueSpec{
+			Weight: 1,
+			Capability: v1.ResourceList{
+				v1.ResourceName("cpu"): resource.MustParse("80"),
+			},
+			Guarantee: schedulingv1beta1.Guarantee{
+				v1.ResourceList{
+					v1.ResourceName("cpu"): resource.MustParse("80"),
+				},
+			},
+		},
+	}
+	queue2 := &schedulingv1beta1.Queue{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "q2",
+		},
+		Spec: schedulingv1beta1.QueueSpec{
+			Weight: 1,
+			Capability: v1.ResourceList{
+				v1.ResourceName("cpu"): resource.MustParse("20"),
+			},
+			Guarantee: schedulingv1beta1.Guarantee{
+				v1.ResourceList{
+					v1.ResourceName("cpu"): resource.MustParse("0"),
+				},
+			},
+		},
+	}
+	queue3 := &schedulingv1beta1.Queue{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "q3",
+		},
+		Spec: schedulingv1beta1.QueueSpec{
+			Weight: 1,
+			Capability: v1.ResourceList{
+				v1.ResourceName("cpu"): resource.MustParse("20"),
+			},
+			Guarantee: schedulingv1beta1.Guarantee{
+				v1.ResourceList{
+					v1.ResourceName("cpu"): resource.MustParse("0"),
+				},
+			},
 		},
 	}
 
@@ -173,11 +236,11 @@ func TestProportion(t *testing.T) {
 		expected map[string]string
 	}{
 		{
-			name:  "pod-deallocate",
+			name:  "pod-panic",
 			pods:  []*apiv1.Pod{w1, w2, w3},
 			nodes: []*apiv1.Node{n1, n2},
-			pcs:   []*schedulingv1.PriorityClass{p1, p2},
-			pgs:   []*schedulingv1beta1.PodGroup{pg1, pg2},
+			pcs:   []*schedulingv1.PriorityClass{p1},
+			pgs:   []*schedulingv1beta1.PodGroup{pg1, pg2, pg3},
 			expected: map[string]string{ // podKey -> node
 				"ns1/worker-3": "node1",
 			},
@@ -226,6 +289,11 @@ func TestProportion(t *testing.T) {
 			schedulerCache.AddPodGroupV1beta1(pg)
 		}
 		schedulerCache.AddQueueV1beta1(queue1)
+		schedulerCache.AddQueueV1beta1(queue2)
+		schedulerCache.AddQueueV1beta1(queue3)
+		//for _, info := range schedulerCache.Jobs {
+		//	t.Log(fmt.Printf("info %v", info))
+		//}
 		// session
 		trueValue := true
 
@@ -264,13 +332,7 @@ func TestProportion(t *testing.T) {
 						if metrics == 12000 {
 							t.Logf("init queue_allocated metrics is ok,%v", metrics)
 						}
-						schedulerCache.DeletePodGroupV1beta1(pg1)
-					} else if num == 2 {
-						metrics := getLocalMetrics()
-						if metrics == 4000 {
-							t.Logf("after delete vcjob pg1, queue_allocated metrics is ok,%v", metrics)
-						}
-						schedulerCache.DeletePodGroupV1beta1(pg2)
+						//schedulerCache.DeletePodGroupV1beta1(pg1)
 					} else {
 						metrics := getLocalMetrics()
 						if metrics != 0 {
